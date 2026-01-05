@@ -6,6 +6,7 @@
 //! <code>git clone https://github.com/cloudflare/boringtun.git</code>
 
 pub mod noise;
+pub mod packet;
 
 #[cfg(not(feature = "mock-instant"))]
 pub(crate) mod sleepyinstant;
