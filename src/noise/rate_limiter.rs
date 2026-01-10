@@ -140,13 +140,12 @@ impl RateLimiter {
 
         let iv = GenericArray::from_slice(&wg_cookie_reply.nonce);
 
-        wg_cookie_reply.encrypted_cookie[..16].copy_from_slice(&cookie);
+        wg_cookie_reply.encrypted_cookie.encrypted = cookie;
         let tag = cipher
-            .encrypt_in_place_detached(iv, mac1, &mut wg_cookie_reply.encrypted_cookie[..16])
+            .encrypt_in_place_detached(iv, mac1, &mut wg_cookie_reply.encrypted_cookie.encrypted)
             .expect("wg_cookie_reply is large enough");
 
-        wg_cookie_reply.encrypted_cookie[16..].copy_from_slice(&tag);
-
+        wg_cookie_reply.encrypted_cookie.tag = tag.into();
         wg_cookie_reply
     }
 
@@ -179,16 +178,14 @@ impl RateLimiter {
         let mac1 = handshake.mac1();
         let mac2 = handshake.mac2();
 
-        let packet_until_mac = &handshake.as_bytes()[..P::MAC1_OFF];
-
-        let computed_mac1 = b2s_keyed_mac_16(&self.mac1_key, packet_until_mac);
+        let computed_mac1 = b2s_keyed_mac_16(&self.mac1_key, handshake.until_mac1());
         if verify_slices_are_equal(&computed_mac1, mac1).is_err() {
             return Err(TunnResult::Err(WireGuardError::InvalidMac));
         }
 
         if self.is_under_load() {
             let cookie = self.current_cookie(src_addr);
-            let computed_mac2 = b2s_keyed_mac_16_2(&cookie, packet_until_mac, mac1);
+            let computed_mac2 = b2s_keyed_mac_16_2(&cookie, handshake.until_mac1(), mac1);
 
             if verify_slices_are_equal(&computed_mac2, mac2).is_err() {
                 let cookie_reply = self.format_cookie_reply(sender_idx, cookie, mac1);

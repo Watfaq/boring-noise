@@ -27,11 +27,11 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The default value to use for rate limiting, when no other rate limiter is defined
+/// The default value to use for rate limiting, when no other rate limiter is defined.
 const PEER_HANDSHAKE_RATE_LIMIT: u64 = 10;
 
 const MAX_QUEUE_DEPTH: usize = 256;
-/// number of sessions in the ring, better keep a PoT
+/// number of sessions in the ring, better keep a PoT.
 const N_SESSIONS: usize = 8;
 
 #[derive(Debug)]
@@ -57,18 +57,18 @@ impl From<WireGuardError> for TunnResult {
     }
 }
 
-/// Tunnel represents a point-to-point WireGuard connection
+/// Tunnel represents a point-to-point WireGuard connection.
 pub struct Tunn {
-    /// The handshake currently in progress
+    /// The handshake currently in progress.
     handshake: handshake::Handshake,
-    /// The [`N_SESSIONS`] most recent sessions, index is session id modulo [`N_SESSIONS`]
+    /// The [`N_SESSIONS`] most recent sessions, index is session id modulo [`N_SESSIONS`].
     sessions: [Option<session::Session>; N_SESSIONS],
-    /// Index of most recently used session
+    /// Index of most recently used session.
     current: usize,
-    /// Queue to store blocked packets
+    /// Queue to store blocked packets.
     packet_queue: VecDeque<Packet>,
 
-    /// Keeps tabs on the expiring timers
+    /// Keeps tabs on the expiring timers.
     timers: timers::Timers,
     tx_bytes: usize,
     rx_bytes: usize,
@@ -80,7 +80,7 @@ impl Tunn {
         self.handshake.is_expired()
     }
 
-    /// Create a new tunnel using own private key and the peer public key
+    /// Create a new tunnel using own private key and the peer public key.
     pub fn new(
         static_private: x25519::StaticSecret,
         peer_static_public: x25519::PublicKey,
@@ -113,7 +113,7 @@ impl Tunn {
         }
     }
 
-    /// Update the private key and clear existing sessions
+    /// Update the private key and clear existing sessions.
     pub fn set_static_private(
         &mut self,
         static_private: x25519::StaticSecret,
@@ -325,13 +325,13 @@ impl Tunn {
         Some(packet)
     }
 
-    /// Get the first packet from [`Self::packet_queue`], and try to encapsulate it.
+    /// Pop the first queued packet if it exists and try to encapsulate it.
     pub fn next_queued_packet(&mut self) -> Option<WgKind> {
         self.dequeue_packet()
             .and_then(|packet| self.handle_outgoing_packet(packet))
     }
 
-    /// Push packet to the back of the queue
+    /// Push packet to the back of the queue.
     fn queue_packet(&mut self, packet: Packet) {
         if self.packet_queue.len() < MAX_QUEUE_DEPTH {
             // Drop if too many are already in queue
