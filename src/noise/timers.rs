@@ -1,13 +1,19 @@
 // Copyright (c) 2019 Cloudflare, Inc. All rights reserved.
+//
+// Modified by Mullvad VPN.
+// Copyright (c) 2025 Mullvad VPN.
+//
 // SPDX-License-Identifier: BSD-3-Clause
 
 use super::errors::WireGuardError;
-use crate::noise::{Tunn, TunnResult};
+use crate::noise::Tunn;
+use crate::packet::WgKind;
+
 use std::mem;
 use std::ops::{Index, IndexMut};
-
 use std::time::Duration;
 
+use bytes::BytesMut;
 #[cfg(feature = "mock-instant")]
 use mock_instant::Instant;
 
@@ -156,8 +162,8 @@ impl Tunn {
             if time_now - *t > REJECT_AFTER_TIME {
                 if let Some(session) = self.sessions[i].take() {
                     tracing::debug!(
-                        message = "SESSION_EXPIRED(REJECT_AFTER_TIME)",
-                        session = session.receiving_index
+                        "SESSION_EXPIRED(REJECT_AFTER_TIME): {}",
+                        session.receiving_index
                     );
                 }
                 *t = time_now;
@@ -165,14 +171,18 @@ impl Tunn {
         }
     }
 
-    pub fn update_timers<'a>(&mut self, dst: &'a mut [u8]) -> TunnResult<'a> {
+    /// Update the tunnel timers
+    ///
+    /// This returns `Ok(None)` if no action is needed, `Ok(Some(packet))` if a packet
+    /// (keepalive or handshake) should be sent, or an error if something went wrong.
+    pub fn update_timers(&mut self) -> Result<Option<WgKind>, WireGuardError> {
         let mut handshake_initiation_required = false;
         let mut keepalive_required = false;
 
         let time = Instant::now();
 
         if self.timers.should_reset_rr {
-            self.rate_limiter.reset_count();
+            self.rate_limiter.try_reset_count();
         }
 
         // All the times are counted from tunnel initiation, for efficiency our timers are rounded
@@ -193,7 +203,7 @@ impl Tunn {
 
         {
             if self.handshake.is_expired() {
-                return TunnResult::Err(WireGuardError::ConnectionExpired);
+                return Err(WireGuardError::ConnectionExpired);
             }
 
             // Clear cookie after COOKIE_EXPIRATION_TIME
@@ -209,7 +219,7 @@ impl Tunn {
                 tracing::error!("CONNECTION_EXPIRED(REJECT_AFTER_TIME * 3)");
                 self.handshake.set_expired();
                 self.clear_all();
-                return TunnResult::Err(WireGuardError::ConnectionExpired);
+                return Err(WireGuardError::ConnectionExpired);
             }
 
             if let Some(time_init_sent) = self.handshake.timer() {
@@ -222,7 +232,7 @@ impl Tunn {
                     tracing::error!("CONNECTION_EXPIRED(REKEY_ATTEMPT_TIME)");
                     self.handshake.set_expired();
                     self.clear_all();
-                    return TunnResult::Err(WireGuardError::ConnectionExpired);
+                    return Err(WireGuardError::ConnectionExpired);
                 }
 
                 if time_init_sent.elapsed() >= REKEY_TIMEOUT {
@@ -301,14 +311,16 @@ impl Tunn {
         }
 
         if handshake_initiation_required {
-            return self.format_handshake_initiation(dst, true);
+            return Ok(self.format_handshake_initiation(true).map(Into::into));
         }
 
         if keepalive_required {
-            return self.encapsulate(&[], dst);
+            return Ok(
+                self.handle_outgoing_packet(crate::packet::Packet::from_bytes(BytesMut::new()))
+            );
         }
 
-        TunnResult::Done
+        Ok(None)
     }
 
     pub fn time_since_last_handshake(&self) -> Option<Duration> {

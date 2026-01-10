@@ -1,12 +1,20 @@
+// Copyright (c) 2019 Cloudflare, Inc. All rights reserved.
+//
+// Modified by Mullvad VPN.
+// Copyright (c) 2025 Mullvad VPN.
+//
+// SPDX-License-Identifier: BSD-3-Clause
+
 use super::handshake::{b2s_hash, b2s_keyed_mac_16, b2s_keyed_mac_16_2, b2s_mac_24};
 use crate::noise::handshake::{LABEL_COOKIE, LABEL_MAC1};
-use crate::noise::{HandshakeInit, HandshakeResponse, Packet, Tunn, TunnResult, WireGuardError};
+use crate::noise::{TunnResult, WireGuardError};
+use crate::packet::{Packet, WgCookieReply, WgHandshakeBase, WgKind};
 
 #[cfg(feature = "mock-instant")]
 use mock_instant::Instant;
-use portable_atomic::AtomicU64;
 use std::net::IpAddr;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 #[cfg(not(feature = "mock-instant"))]
 use crate::sleepyinstant::Instant;
@@ -22,14 +30,15 @@ const COOKIE_REFRESH: u64 = 128; // Use 128 and not 120 so the compiler can opti
 const COOKIE_SIZE: usize = 16;
 const COOKIE_NONCE_SIZE: usize = 24;
 
-/// How often should reset count in seconds
-const RESET_PERIOD: u64 = 1;
+/// How often to reset the under-load counter
+const RESET_PERIOD: Duration = Duration::from_secs(1);
 
 type Cookie = [u8; COOKIE_SIZE];
 
 /// There are two places where WireGuard requires "randomness" for cookies
 /// * The 24 byte nonce in the cookie massage - here the only goal is to avoid nonce reuse
 /// * A secret value that changes every two minutes
+///
 /// Because the main goal of the cookie is simply for a party to prove ownership of an IP address
 /// we can relax the randomness definition a bit, in order to avoid locking, because using less
 /// resources is the main goal of any DoS prevention mechanism.
@@ -76,11 +85,11 @@ impl RateLimiter {
     }
 
     /// Reset packet count (ideally should be called with a period of 1 second)
-    pub fn reset_count(&self) {
+    pub fn try_reset_count(&self) {
         // The rate limiter is not very accurate, but at the scale we care about it doesn't matter much
         let current_time = Instant::now();
         let mut last_reset_time = self.last_reset.lock();
-        if current_time.duration_since(*last_reset_time).as_secs() >= RESET_PERIOD {
+        if current_time.duration_since(*last_reset_time) >= RESET_PERIOD {
             self.count.store(0, Ordering::SeqCst);
             *last_reset_time = current_time;
         }
@@ -113,82 +122,81 @@ impl RateLimiter {
         self.count.fetch_add(1, Ordering::SeqCst) >= self.limit
     }
 
-    pub(crate) fn format_cookie_reply<'a>(
+    pub(crate) fn format_cookie_reply(
         &self,
         idx: u32,
         cookie: Cookie,
         mac1: &[u8],
-        dst: &'a mut [u8],
-    ) -> Result<&'a mut [u8], WireGuardError> {
-        if dst.len() < super::COOKIE_REPLY_SZ {
-            return Err(WireGuardError::DestinationBufferTooSmall);
-        }
-
-        let (message_type, rest) = dst.split_at_mut(4);
-        let (receiver_index, rest) = rest.split_at_mut(4);
-        let (nonce, rest) = rest.split_at_mut(24);
-        let (encrypted_cookie, _) = rest.split_at_mut(16 + 16);
+    ) -> WgCookieReply {
+        let mut wg_cookie_reply = WgCookieReply::new();
 
         // msg.message_type = 3
         // msg.reserved_zero = { 0, 0, 0 }
-        message_type.copy_from_slice(&super::COOKIE_REPLY.to_le_bytes());
         // msg.receiver_index = little_endian(initiator.sender_index)
-        receiver_index.copy_from_slice(&idx.to_le_bytes());
-        nonce.copy_from_slice(&self.nonce()[..]);
+        wg_cookie_reply.receiver_idx.set(idx);
+        wg_cookie_reply.nonce = self.nonce();
 
         let cipher = XChaCha20Poly1305::new(&self.cookie_key);
 
-        let iv = GenericArray::from_slice(nonce);
+        let iv = GenericArray::from_slice(&wg_cookie_reply.nonce);
 
-        encrypted_cookie[..16].copy_from_slice(&cookie);
+        wg_cookie_reply.encrypted_cookie.encrypted = cookie;
         let tag = cipher
-            .encrypt_in_place_detached(iv, mac1, &mut encrypted_cookie[..16])
-            .map_err(|_| WireGuardError::DestinationBufferTooSmall)?;
+            .encrypt_in_place_detached(iv, mac1, &mut wg_cookie_reply.encrypted_cookie.encrypted)
+            .expect("wg_cookie_reply is large enough");
 
-        encrypted_cookie[16..].copy_from_slice(&tag);
-
-        Ok(&mut dst[..super::COOKIE_REPLY_SZ])
+        wg_cookie_reply.encrypted_cookie.tag = tag.into();
+        wg_cookie_reply
     }
 
-    /// Verify the MAC fields on the datagram, and apply rate limiting if needed
-    pub fn verify_packet<'a, 'b>(
-        &self,
-        src_addr: Option<IpAddr>,
-        src: &'a [u8],
-        dst: &'b mut [u8],
-    ) -> Result<Packet<'a>, TunnResult<'b>> {
-        let packet = Tunn::parse_incoming_packet(src)?;
+    /// Decode the packet as wireguard packet.
+    /// Then, verify the MAC fields on the packet (if any), and apply rate limiting if needed.
+    pub fn verify_packet(&self, src_addr: IpAddr, packet: Packet) -> Result<WgKind, TunnResult> {
+        let packet = packet
+            .try_into_wg()
+            .map_err(|_err| TunnResult::Err(WireGuardError::InvalidPacket))?;
 
         // Verify and rate limit handshake messages only
-        if let Packet::HandshakeInit(HandshakeInit { sender_idx, .. })
-        | Packet::HandshakeResponse(HandshakeResponse { sender_idx, .. }) = packet
-        {
-            let (msg, macs) = src.split_at(src.len() - 32);
-            let (mac1, mac2) = macs.split_at(16);
+        match packet {
+            WgKind::HandshakeInit(packet) => self
+                .verify_handshake(src_addr, packet)
+                .map(WgKind::HandshakeInit),
+            WgKind::HandshakeResp(packet) => self
+                .verify_handshake(src_addr, packet)
+                .map(WgKind::HandshakeResp),
+            _ => Ok(packet),
+        }
+    }
 
-            let computed_mac1 = b2s_keyed_mac_16(&self.mac1_key, msg);
-            verify_slices_are_equal(&computed_mac1[..16], mac1)
-                .map_err(|_| TunnResult::Err(WireGuardError::InvalidMac))?;
+    /// Verify the MAC fields on the handshake, and apply rate limiting if needed.
+    pub(crate) fn verify_handshake<P: WgHandshakeBase>(
+        &self,
+        src_addr: IpAddr,
+        handshake: Packet<P>,
+    ) -> Result<Packet<P>, TunnResult> {
+        let sender_idx = handshake.sender_idx();
+        let mac1 = handshake.mac1();
+        let mac2 = handshake.mac2();
 
-            if self.is_under_load() {
-                let addr = match src_addr {
-                    None => return Err(TunnResult::Err(WireGuardError::UnderLoad)),
-                    Some(addr) => addr,
-                };
-
-                // Only given an address can we validate mac2
-                let cookie = self.current_cookie(addr);
-                let computed_mac2 = b2s_keyed_mac_16_2(&cookie, msg, mac1);
-
-                if verify_slices_are_equal(&computed_mac2[..16], mac2).is_err() {
-                    let cookie_packet = self
-                        .format_cookie_reply(sender_idx, cookie, mac1, dst)
-                        .map_err(TunnResult::Err)?;
-                    return Err(TunnResult::WriteToNetwork(cookie_packet));
-                }
-            }
+        let computed_mac1 = b2s_keyed_mac_16(&self.mac1_key, handshake.until_mac1());
+        if verify_slices_are_equal(&computed_mac1, mac1).is_err() {
+            return Err(TunnResult::Err(WireGuardError::InvalidMac));
         }
 
-        Ok(packet)
+        if self.is_under_load() {
+            let cookie = self.current_cookie(src_addr);
+            let computed_mac2 = b2s_keyed_mac_16_2(&cookie, handshake.until_mac1(), mac1);
+
+            if verify_slices_are_equal(&computed_mac2, mac2).is_err() {
+                let cookie_reply = self.format_cookie_reply(sender_idx, cookie, mac1);
+                let packet = handshake.overwrite_with(&cookie_reply);
+                return Err(TunnResult::WriteToNetwork(packet.into()));
+            }
+
+            // If under load but mac2 is valid, allow the handshake
+            return Ok(handshake);
+        }
+
+        Ok(handshake)
     }
 }
