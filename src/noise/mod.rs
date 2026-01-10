@@ -23,7 +23,6 @@ use crate::packet::{Packet, WgCookieReply, WgData, WgHandshakeInit, WgHandshakeR
 use crate::x25519;
 
 use std::collections::VecDeque;
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,15 +39,6 @@ pub enum TunnResult {
     Err(WireGuardError),
     WriteToNetwork(WgKind),
     WriteToTunnel(Packet),
-}
-
-#[derive(Debug)]
-pub enum TunnResultOld<'a> {
-    Done,
-    Err(WireGuardError),
-    WriteToNetwork(&'a mut [u8]),
-    WriteToTunnelV4(&'a mut [u8], Ipv4Addr),
-    WriteToTunnelV6(&'a mut [u8], Ipv6Addr),
 }
 
 impl From<WireGuardError> for TunnResult {
