@@ -9,7 +9,7 @@ use std::ops::{Index, IndexMut};
 use std::time::Duration;
 
 #[cfg(feature = "mock-instant")]
-use mock_instant::Instant;
+use mock_instant::global::Instant;
 
 #[cfg(not(feature = "mock-instant"))]
 use crate::sleepyinstant::Instant;

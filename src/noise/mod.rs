@@ -738,7 +738,7 @@ mod tests {
 
         // Advance time 1 second and "send" 1 packet so that we send a handshake
         // after the timeout
-        mock_instant::MockClock::advance(Duration::from_secs(1));
+        mock_instant::global::MockClock::advance(Duration::from_secs(1));
         assert!(matches!(their_tun.update_timers(&mut []), TunnResult::Done));
         assert!(matches!(
             my_tun.update_timers(&mut my_dst),
@@ -749,7 +749,7 @@ mod tests {
         assert!(matches!(data, TunnResult::WriteToNetwork(_)));
 
         //Advance to timeout
-        mock_instant::MockClock::advance(REKEY_AFTER_TIME);
+        mock_instant::global::MockClock::advance(REKEY_AFTER_TIME);
         assert!(matches!(their_tun.update_timers(&mut []), TunnResult::Done));
         update_timer_results_in_handshake(&mut my_tun);
     }
@@ -763,7 +763,7 @@ mod tests {
         let packet = Tunn::parse_incoming_packet(&init).unwrap();
         assert!(matches!(packet, Packet::HandshakeInit(_)));
 
-        mock_instant::MockClock::advance(REKEY_TIMEOUT);
+        mock_instant::global::MockClock::advance(REKEY_TIMEOUT);
         update_timer_results_in_handshake(&mut my_tun)
     }
 
